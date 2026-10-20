@@ -32,7 +32,9 @@ export class CliBackend implements Backend {
   private fail(child:ChildProcessWithoutNullStreams,message:string) {
     if (this.child!==child) return;
     this.child=undefined;
+    child.stdin.end();
     child.kill("SIGTERM");
+    const killTimer=setTimeout(()=>child.kill("SIGKILL"),3000);killTimer.unref();child.once("close",()=>clearTimeout(killTimer));
     for(const p of this.pending.values()){ clearTimeout(p.timer); p.reject(new Error(message)); }
     this.pending.clear();
   }

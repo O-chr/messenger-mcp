@@ -17,6 +17,8 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
   const origin=new URL(publicUrl).origin;
   const app=createMcpExpressApp({host:"127.0.0.1",allowedHosts:[new URL(publicUrl).hostname,"127.0.0.1","localhost"]});
   app.disable("x-powered-by");
+  // Only the local cloudflared hop is trusted; do not trust arbitrary proxies.
+  app.set("trust proxy","loopback");
   app.use((req,res,next)=>{
     if(req.headers.origin && ![origin,"https://chatgpt.com","https://chat.openai.com"].includes(req.headers.origin)){res.status(403).json({error:"Origin denied"});return;}
     res.setHeader("Cache-Control","no-store");next();
