@@ -5,12 +5,14 @@ import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
 import {ElicitRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {buildServer} from './server.js';
 import {defaultConfig,type Config} from './policy.js';
+import {Confirmations} from './confirmations.js';
 
 const config=():Config=>({version:1,permissions:['read','write'],confirm_send:true,chats:{'100':{name:'Friend',kind:'dm',jid:'999@msgr',read:true,write:true},'200':{name:'Secret',kind:'dm',jid:'200@msgr',read:false,write:false}}});
-async function harness(cfg:Config,form=false,onRequest?:(op:string)=>void){
+async function harness(cfg:Config,form=false,onRequest?:(op:string)=>void,fallback=false){
   const calls:{op:string;args:unknown}[]=[];
   const backend={request:async(op:string,args?:Record<string,unknown>)=>{calls.push({op,args});onRequest?.(op);return {ok:true};},close(){}};
-  const {server}=buildServer({backend,load:()=>structuredClone(cfg),permissions:'read,write'});
+  const confirmations=fallback?new Confirmations('https://example.test',backend,()=>cfg):undefined;
+  const {server}=buildServer({backend,load:()=>structuredClone(cfg),permissions:'read,write',confirmations,clientId:fallback?'client':undefined});
   const client=new Client({name:'test',version:'1'},{capabilities:form?{elicitation:{form:{}}}:{}});
   const [a,b]=InMemoryTransport.createLinkedPair();await server.connect(a);await client.connect(b);
   return {client,calls,close:async()=>{await client.close();await server.close();}};
@@ -53,4 +55,11 @@ test('status reports whether this client supports the required send confirmation
     const r=await h.client.callTool({name:'messenger_status'});const c=r.content as {type:string;text:string}[];
     assert.equal(JSON.parse(c[0].text).confirmation_supported,form);
   }finally{await h.close();}}
+});
+test('clients without forms receive an owner-only link and a read-only status tool; nothing is sent',async()=>{
+  const h=await harness(config(),false,undefined,true);try{
+    const r=await h.client.callTool({name:'messenger_send_message',arguments:{chat_id:'100',text:'exact body'}});
+    const p=JSON.parse((r.content as {text:string}[])[0].text);assert.equal(p.status,'pending');assert.match(p.confirmation_url,/^https:\/\/example.test\/confirm\//);assert.equal(h.calls.length,0);
+    const s=await h.client.callTool({name:'messenger_send_status',arguments:{confirmation_id:p.confirmation_id}});assert.equal(s.isError,false);assert.equal(h.calls.length,0);
+  }finally{await h.close();}
 });

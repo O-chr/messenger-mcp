@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import express from "express";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -10,11 +10,13 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import type { OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { buildServer } from "./server.js";
 import { CliBackend, type Backend } from "./backend.js";
-import { toolPerms } from "./policy.js";
+import { toolPerms, loadConfig, type Config } from "./policy.js";
 import { GoogleGatedProvider } from "./auth.js";
+import { Confirmations, confirmationHTML } from "./confirmations.js";
 
-export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,backend:Backend){
+export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,backend:Backend,load:()=>Config=loadConfig){
   const origin=new URL(publicUrl).origin;
+  const confirmations=provider instanceof GoogleGatedProvider?new Confirmations(publicUrl,backend,load):undefined;
   const app=createMcpExpressApp({host:"127.0.0.1",allowedHosts:[new URL(publicUrl).hostname,"127.0.0.1","localhost"]});
   app.disable("x-powered-by");
   // Only the local cloudflared hop is trusted; do not trust arbitrary proxies.
@@ -29,8 +31,42 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
   app.get("/oauth/google/callback",async(req,res)=>{
     try{
       if(!(provider instanceof GoogleGatedProvider)){res.sendStatus(404);return;}
-      const back=await provider.handleGoogleCallback(String(req.query.code??""),String(req.query.state??""));res.redirect(back);
+      const state=String(req.query.state??""),code=String(req.query.code??"");
+      if(provider.isOwnerConfirmationCallback(state)){
+        const s=await provider.finishOwnerConfirmation(code,state);
+        res.cookie("__Secure-messenger-confirm",s.cookie,{httpOnly:true,secure:true,sameSite:"lax",path:"/confirm",maxAge:600_000});
+        res.redirect(`/confirm/${s.approvalId}`);return;
+      }
+      const back=await provider.handleGoogleCallback(code,state);res.redirect(back);
     }catch{res.status(403).type("text").send("Google login was not accepted. Use the configured owner's account or restart the login flow.");}
+  });
+  const webSession=(cookie:string|undefined,id:string)=>{
+    if(!(provider instanceof GoogleGatedProvider))return undefined;
+    const value=cookie?.split(";").map(v=>v.trim()).find(v=>v.startsWith("__Secure-messenger-confirm="))?.slice("__Secure-messenger-confirm=".length);
+    return value?provider.ownerConfirmationSession(value,id):undefined;
+  };
+  const protectPage=(res:express.Response)=>{
+    res.setHeader("Content-Security-Policy","default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    res.setHeader("Referrer-Policy","no-referrer");res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("X-Frame-Options","DENY");
+  };
+  app.get("/confirm/:id",(req,res)=>{
+    protectPage(res);const id=String(req.params.id);
+    if(!confirmations?.has(id)||!(provider instanceof GoogleGatedProvider)){res.status(404).send("Confirmation expired or unavailable.");return;}
+    const owner=webSession(req.headers.cookie,id);
+    if(!owner){try{res.redirect(provider.beginOwnerConfirmation(id));}catch{res.status(429).send("Restart confirmation later.");}return;}
+    try{res.type("html").send(confirmationHTML(confirmations.describe(id),owner.csrf));}catch{res.status(403).send("Permission revoked or confirmation expired. Not sent.");}
+  });
+  app.post("/confirm/:id",express.urlencoded({extended:false,limit:"2kb"}),async(req,res)=>{
+    protectPage(res);const id=String(req.params.id),owner=webSession(req.headers.cookie,id);
+    const csrf=typeof req.body?.csrf==="string"?req.body.csrf:"";
+    const actual=Buffer.from(csrf),expected=Buffer.from(owner?.csrf??"");
+    if(!confirmations||!owner||req.headers.origin!==origin||actual.length!==expected.length||!timingSafeEqual(actual,expected)){res.status(403).send("Owner confirmation required. Not sent.");return;}
+    try{
+      if(req.body.decision==="approve")await confirmations.approve(id);
+      else if(req.body.decision==="decline")confirmations.decline(id);
+      else{res.status(400).send("Invalid decision. Not sent.");return;}
+      res.type("html").send(confirmationHTML(confirmations.describe(id),owner.csrf));
+    }catch{res.status(403).send("Permission revoked or confirmation expired. Not sent.");}
   });
   type Session={transport:StreamableHTTPServerTransport;server:ReturnType<typeof buildServer>["server"];clientId:string;lastUsed:number};
   const sessions=new Map<string,Session>();
@@ -46,15 +82,15 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
     }
     if(req.method!=="POST"||req.body?.method!=="initialize"){res.status(400).json({error:"Initialize an authenticated MCP session first"});return;}
     if(sessions.size>=30){res.status(429).json({error:"Too many MCP sessions"});return;}
-    const {server}=buildServer({backend});
+    const {server}=buildServer({backend,load,confirmations,clientId:req.auth!.clientId});
     let record:Session;
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:randomUUID,onsessioninitialized:sid=>{sessions.set(sid,record);}});
     record={transport,server,clientId:req.auth!.clientId,lastUsed:Date.now()};
     transport.onclose=()=>{if(transport.sessionId)sessions.delete(transport.sessionId);};
     try{await server.connect(transport);await transport.handleRequest(req,res,req.body);}catch{await server.close();if(!res.headersSent)res.status(500).json({error:"MCP initialization failed"});}
   });
-  const cleanup=setInterval(()=>{for(const [id,s]of sessions)if(Date.now()-s.lastUsed>30*60_000){sessions.delete(id);void s.server.close();}},60_000);cleanup.unref();
-  return {app,close:async()=>{clearInterval(cleanup);for(const s of sessions.values())await s.server.close();sessions.clear();backend.close();}};
+  const cleanup=setInterval(()=>{confirmations?.prune();for(const [id,s]of sessions)if(Date.now()-s.lastUsed>30*60_000){sessions.delete(id);void s.server.close();}},60_000);cleanup.unref();
+  return {app,confirmations,close:async()=>{clearInterval(cleanup);for(const s of sessions.values())await s.server.close();sessions.clear();backend.close();}};
 }
 
 if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){

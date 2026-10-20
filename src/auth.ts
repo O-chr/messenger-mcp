@@ -22,6 +22,8 @@ export class GoogleGatedProvider implements OAuthServerProvider {
   private data:Data={version:1,clients:{},tokens:{}};
   private pending=new Map<string,Pending>();
   private codes=new Map<string,Code>();
+  private webPending=new Map<string,{approvalId:string;nonce:string;verifier:string;expires:number}>();
+  private webSessions=new Map<string,{approvalId:string;csrf:string;expires:number}>();
   private store:string;
   private jwks=createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
   constructor(private cfg:GoogleCfg){
@@ -56,20 +58,44 @@ export class GoogleGatedProvider implements OAuthServerProvider {
     if(this.pending.size>=100)throw new InvalidGrantError("Too many pending logins.");
     const state=rand(),nonce=rand(),verifier=rand();
     this.pending.set(state,{client,params,nonce,verifier,expires:now()+600});
+    res.redirect(this.googleURL(state,nonce,verifier));
+  }
+  private googleURL(state:string,nonce:string,verifier:string){
     const u=new URL("https://accounts.google.com/o/oauth2/v2/auth");
     u.search=new URLSearchParams({client_id:this.cfg.clientId,redirect_uri:`${this.cfg.publicUrl}/oauth/google/callback`,response_type:"code",scope:"openid email",state,nonce,code_challenge:createHash("sha256").update(verifier).digest("base64url"),code_challenge_method:"S256",prompt:"select_account"}).toString();
-    res.redirect(u.href);
+    return u.href;
   }
   async handleGoogleCallback(code:string,state:string){
     const p=this.pending.get(state);this.pending.delete(state);
     if(!p||p.expires<now()||!code)throw new InvalidGrantError("Login expired.");
-    const r=await fetch("https://oauth2.googleapis.com/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({code,client_id:this.cfg.clientId,client_secret:this.cfg.clientSecret,redirect_uri:`${this.cfg.publicUrl}/oauth/google/callback`,grant_type:"authorization_code",code_verifier:p.verifier}),signal:AbortSignal.timeout(20000)});
+    await this.verifyOwner(code,p.nonce,p.verifier);
+    const value=rand();this.codes.set(value,{clientId:p.client.client_id,challenge:p.params.codeChallenge,redirect:p.params.redirectUri,expires:now()+300});
+    const back=new URL(p.params.redirectUri);back.searchParams.set("code",value);if(p.params.state)back.searchParams.set("state",p.params.state);return back.href;
+  }
+  private async verifyOwner(code:string,nonce:string,verifier:string){
+    const r=await fetch("https://oauth2.googleapis.com/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({code,client_id:this.cfg.clientId,client_secret:this.cfg.clientSecret,redirect_uri:`${this.cfg.publicUrl}/oauth/google/callback`,grant_type:"authorization_code",code_verifier:verifier}),signal:AbortSignal.timeout(20000)});
     if(!r.ok)throw new InvalidGrantError("Google login failed.");
     const token=(await r.json() as {id_token?:string}).id_token;if(!token)throw new InvalidGrantError("Google login failed.");
     const claims=this.cfg.verifyGoogleToken?await this.cfg.verifyGoogleToken(token):(await jwtVerify(token,this.jwks,{audience:this.cfg.clientId,issuer:["https://accounts.google.com","accounts.google.com"]})).payload;
-    if(claims.aud!==this.cfg.clientId||claims.nonce!==p.nonce||claims.email_verified!==true||typeof claims.email!=="string"||claims.email.toLowerCase()!==this.cfg.allowedEmail.toLowerCase())throw new InvalidGrantError("This Google account is not allowed.");
-    const value=rand();this.codes.set(value,{clientId:p.client.client_id,challenge:p.params.codeChallenge,redirect:p.params.redirectUri,expires:now()+300});
-    const back=new URL(p.params.redirectUri);back.searchParams.set("code",value);if(p.params.state)back.searchParams.set("state",p.params.state);return back.href;
+    if(claims.aud!==this.cfg.clientId||claims.nonce!==nonce||claims.email_verified!==true||typeof claims.email!=="string"||claims.email.toLowerCase()!==this.cfg.allowedEmail.toLowerCase())throw new InvalidGrantError("This Google account is not allowed.");
+  }
+  beginOwnerConfirmation(approvalId:string){
+    for(const [k,p]of this.webPending)if(p.expires<now())this.webPending.delete(k);
+    for(const [k,p]of this.webSessions)if(p.expires<now())this.webSessions.delete(k);
+    if(this.webPending.size>=100)throw new InvalidGrantError("Too many pending confirmations.");
+    const state=rand(),nonce=rand(),verifier=rand();this.webPending.set(state,{approvalId,nonce,verifier,expires:now()+600});
+    return this.googleURL(state,nonce,verifier);
+  }
+  isOwnerConfirmationCallback(state:string){return this.webPending.has(state);}
+  async finishOwnerConfirmation(code:string,state:string){
+    const p=this.webPending.get(state);this.webPending.delete(state);
+    if(!p||p.expires<now()||!code)throw new InvalidGrantError("Confirmation login expired.");
+    await this.verifyOwner(code,p.nonce,p.verifier);
+    const cookie=rand();this.webSessions.set(hash(cookie),{approvalId:p.approvalId,csrf:rand(),expires:now()+600});
+    return {approvalId:p.approvalId,cookie};
+  }
+  ownerConfirmationSession(cookie:string,approvalId:string){
+    const s=this.webSessions.get(hash(cookie));return s&&s.expires>=now()&&s.approvalId===approvalId?{csrf:s.csrf}:undefined;
   }
   async challengeForAuthorizationCode(client:OAuthClientInformationFull,code:string){
     const c=this.codes.get(code);if(!c||c.expires<now()||c.clientId!==client.client_id)throw new InvalidGrantError("Invalid code.");return c.challenge;
