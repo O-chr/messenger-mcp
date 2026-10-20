@@ -1,4 +1,4 @@
-# 個人Messenger MCP
+# Messenger MCP
 
 個人Facebook Messengerの許可済みチャットをChatGPT／Codexから扱う、本人専用のMCPサーバー。
 
@@ -13,6 +13,15 @@
 
 ChatGPT／Codex → HTTPS + 本人Google認証 → Node MCPサーバー → ローカルJSON-lines → Go Messenger CLI → Messenger E2EE。
 Go側は `mautrix/meta` を基にした `internal/messengercli`。デバイス鍵を保持するプロセスは1つで、複数のMCPクライアントが共有する。Web公開するのは認証済みMCPのみ。Cookieやデバイス鍵をツールに渡さない。
+
+このリポジトリにNode MCPサーバーとGo CLIをまとめている。
+
+- `src/`: MCPツール、権限管理、Google OAuth、本人確認ページ
+- `backend/`: Go CLIと、その基盤となるmautrix/metaのソース
+- `plugin/`: ChatGPT／Codex向けプラグイン・スキル
+- `docs/`: 接続・検証記録と移行元の情報
+
+Goコードのライセンスと例外は [backend/LICENSE](backend/LICENSE) と [backend/LICENSE.exceptions](backend/LICENSE.exceptions) を参照。取り込み元のコミットは [docs/provenance.md](docs/provenance.md) に記録している。
 
 ## 権限設定（Mac所有者のみ）
 
@@ -45,7 +54,21 @@ Codex等のMCPフォーム対応クライアントでは、その場で送信を
 ```sh
 npm ci --ignore-scripts
 npm test
-npm run build
+npm run build:all
+```
+
+Node.js 22以上と、`backend/go.mod` の指定を満たすGoツールチェーンが必要。`build:all` は `backend/bin/messenger` と `dist/` を生成する。MCPは標準で同じリポジトリ内のCLIを使い、`MESSENGER_BIN` で変更できる。
+
+初回のCookie取り込みとチャット同期はMCPを起動する前に行う。コピーしたcURLはコマンドとして実行せず、CLIの非表示入力へ貼り付ける。
+
+```sh
+./backend/bin/messenger login
+./backend/bin/messenger chats
+npm run admin -- permissions read,write
+npm run admin -- allow 123456 read,write
+```
+
+```sh
 GOOGLE_OAUTH_JSON=/private/path/google-oauth.json \
 MESSENGER_MCP_ALLOWED_EMAIL=owner@example.com \
 MESSENGER_MCP_PUBLIC_URL=https://your-domain.example \

@@ -7,3 +7,7 @@ config.json
 oauth.json
 google-oauth.json
 .local-review/
+account.json
+cookies.json
+*.pem
+*.key

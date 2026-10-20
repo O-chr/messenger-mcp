@@ -1,9 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, STATE_DIR } from "./policy.js";
 
 export interface Backend { request(op: string, args?: Record<string, unknown>): Promise<unknown>; close(): void }
-export const CLI_BIN = process.env.MESSENGER_BIN ?? "/Users/chr/code/mautrix-meta/bin/messenger";
+export const CLI_BIN = process.env.MESSENGER_BIN ?? fileURLToPath(new URL("../backend/bin/messenger", import.meta.url));
 export class CliBackend implements Backend {
   private child?: ChildProcessWithoutNullStreams;
   private sequence=0;
