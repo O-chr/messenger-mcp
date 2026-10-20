@@ -1,0 +1,8 @@
+{
+  "$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name":"messenger-personal",
+  "version":"0.1.0",
+  "description":"本人が許可した個人Messengerチャットの読み取りと、本人確認後のE2EE送信。",
+  "author":{"name":"Chiharu"},
+  "extensions":{"com.openai":{"interface":{"displayName":"個人Messenger","shortDescription":"許可済みMessengerの読み取り・送信","longDescription":"個人Facebook Messengerの許可済みチャット一覧、最近のメッセージ確認、本人確認後のE2EE送信。権限はMac所有者がチャット単位・読み書き別で設定。","developerName":"Chiharu","category":"Productivity","capabilities":["Interactive"],"defaultPrompt":"許可済みのMessengerチャットと読み書き権限を確認して。"}}}
+}

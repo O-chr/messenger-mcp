@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.env*
+*.db*
+config.json
+oauth.json
+google-oauth.json
+.local-review/
