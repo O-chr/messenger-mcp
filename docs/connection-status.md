@@ -25,3 +25,10 @@ Confirmation paths:
 - ChatGPT: the send tool returns a pending confirmation link without sending. The owner signs in with Google and approves the exact recipient/body on a CSRF-protected page. GETs and link previews never send; duplicate POSTs cannot send twice; revocation/target changes/expiry prevent approval. The AI must not approve on the user's behalf.
 - The browser confirmation, isolated Google login, no-cookie/wrong-origin/wrong-CSRF rejection, single-send behavior, and unknown-outcome handling were tested with a fake backend. The page was visually checked with clearly fictitious data. No additional real Messenger message was sent for MCP verification.
 - Normal Chat verification: https://chatgpt.com/c/6ad76c4f-ec38-83ec-a1d8-776c5843d1ac
+
+Final normal-Chat verification passed after tool refresh:
+
+- Actual calls executed in order: messenger_list_chats, messenger_status, messenger_send_status.
+- 23 chats readable and writable; connected=true; confirmation_supported=true; native_form_supported=false; confirmation_method=google_owner_web_page.
+- Send-status lookup with a deliberately nonexistent 43-character identifier returned the expected “Confirmation expired or unavailable.” error. No send, approval, or message-body fetch was performed in the ChatGPT verification.
+- The registered hosted App now exposes the result-status tool as well as the original four tools. Existing open conversations may need a fresh tool discovery context.
