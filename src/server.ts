@@ -17,7 +17,7 @@ export function buildServer(opts:Options={}) {
     const cfg=load();
     const permissions=cfg.permissions.filter(p=>ceiling.has(p));
     const allowedChats=Object.keys(cfg.chats).filter(id=>allowed("read",id,cfg,ceiling)||allowed("write",id,cfg,ceiling));
-    return text({permissions,allowed_chat_count:allowedChats.length,confirmation_required:true,...await backend.request("status") as object});
+    return text({permissions,allowed_chat_count:allowedChats.length,confirmation_required:true,confirmation_supported:Boolean(server.server.getClientCapabilities()?.elicitation?.form),...await backend.request("status") as object});
   }));
   server.registerTool("messenger_list_chats",{description:"List only owner-allowed personal Messenger chats, with IDs and effective read/write permissions. Unallowed chats are not disclosed.",annotations:{readOnlyHint:true}},async()=>safe(async()=>{
     const cfg=load();

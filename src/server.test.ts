@@ -48,3 +48,9 @@ test('revocation while reading drops fetched data',async()=>{
     const r=await h.client.callTool({name:'messenger_read_messages',arguments:{chat_id:'100'}});assert.equal(r.isError,true);assert.doesNotMatch(JSON.stringify(r),/"ok"/);
   }finally{await h.close();}
 });
+test('status reports whether this client supports the required send confirmation',async()=>{
+  for(const form of [false,true]){const h=await harness(config(),form);try{
+    const r=await h.client.callTool({name:'messenger_status'});const c=r.content as {type:string;text:string}[];
+    assert.equal(JSON.parse(c[0].text).confirmation_supported,form);
+  }finally{await h.close();}}
+});

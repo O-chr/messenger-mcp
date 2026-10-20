@@ -1,0 +1,19 @@
+{
+  "apps": "./.app.json",
+  "author": {
+    "name": "App developer"
+  },
+  "description": "本人が許可した個人Messengerチャットの読み取りと、確認後のメッセージ送信。",
+  "interface": {
+    "capabilities": [],
+    "category": "Other",
+    "defaultPrompt": null,
+    "developerName": "App developer",
+    "displayName": "個人Messenger MCP",
+    "longDescription": "本人が許可した個人Messengerチャットの読み取りと、確認後のメッセージ送信。",
+    "shortDescription": "本人が許可した個人Messengerチャットの読み取りと、確認後のメッセージ送信。"
+  },
+  "name": "dev-6ad76a3077648191860ed3c56ada7ac1",
+  "version": "1.0.1",
+  "skills": "./skills/"
+}
