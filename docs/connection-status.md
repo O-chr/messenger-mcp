@@ -6,8 +6,8 @@ Implemented and running on the owner's Mac:
 - Private GitHub: O-chr/messenger-personal-mcp; Go backend: O-chr/messenger-cli
 - Separate Messenger launchd service, Cloudflare tunnel, OAuth token store and permission policy.
 - Owner requested read/write on all currently known chats. Explicit rules exist for 23 chats; future chats remain denied. Fifteen currently mapped DMs support E2EE; eight legacy groups lack a supported send route.
-- Live E2EE text cache only; no secure-storage history import. No additional real test message has been sent for the MCP work.
-- Twelve TypeScript tests pass, covering MCP calls and OAuth/HTTP boundaries. Go tests with race detector and go vet pass. npm audit reports zero vulnerabilities.
+- Live E2EE text cache plus optional on-demand secure-storage text history. History setup is owner-only and requires the PIN on the separate web page; PINs are neither MCP arguments nor persisted. Historical plaintext is not cached on disk. No additional real test message has been sent for the MCP work.
+- Thirteen TypeScript tests pass, covering MCP calls and OAuth/HTTP boundaries including history permissions and PIN setup. Go tests with race detector and go vet pass. npm audit reports zero vulnerabilities.
 - Public health returns 200. The MCP endpoint returns 401 without authentication. Configuration and cache permissions verified 0600.
 
 Account connection progress:
@@ -32,3 +32,11 @@ Final normal-Chat verification passed after tool refresh:
 - 23 chats readable and writable; connected=true; confirmation_supported=true; native_form_supported=false; confirmation_method=google_owner_web_page.
 - Send-status lookup with a deliberately nonexistent 43-character identifier returned the expected “Confirmation expired or unavailable.” error. No send, approval, or message-body fetch was performed in the ChatGPT verification.
 - The registered hosted App now exposes the result-status tool as well as the original four tools. Existing open conversations may need a fresh tool discovery context.
+
+Secure history rollout:
+
+- Added `messenger_read_history` with exact per-chat read/JID checks, a maximum of 50 messages, backwards pagination, and permission rechecks before returning decrypted text. Disappearing messages and unsupported formats are excluded; empty text pages do not prove that no older history exists.
+- The owner setup page is `/history/setup`, protected by Google owner authentication, a purpose-bound HttpOnly session, CSRF and strict Origin checks. It reuses upstream secure-history recovery and enrollment, saves recovered device keys in the private local profile, and never automatically retries a PIN or uncertain enrollment.
+- The first browser submission was rejected by the HTTP Origin guard before Meta recovery. `Referrer-Policy: no-referrer` made Chrome navigation form POSTs use `Origin: null`. Replaced it with `same-origin`, preserving strict Origin/CSRF checks. Chrome accepted a dummy local form POST after the change; automated tests assert the header and continue rejecting `Origin: null`.
+- The updated service is running, connected=true and history_ready=false. The owner has been asked to re-enter the PIN on the corrected page. Real historical retrieval remains unverified until setup succeeds.
+- Hosted plugin update to 1.0.3 was accepted (release `pluginrel_6ad77a5eef4081918662a7ff8b5847c6`). Subsequent source read-back is currently unavailable because the Plugin Creator connector session closed. ChatGPT tool refresh remains pending.

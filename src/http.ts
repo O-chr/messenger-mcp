@@ -13,6 +13,7 @@ import { CliBackend, type Backend } from "./backend.js";
 import { toolPerms, loadConfig, type Config } from "./policy.js";
 import { GoogleGatedProvider } from "./auth.js";
 import { Confirmations, confirmationHTML } from "./confirmations.js";
+import { historyPage } from "./history-page.js";
 
 export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,backend:Backend,load:()=>Config=loadConfig){
   const origin=new URL(publicUrl).origin;
@@ -34,8 +35,9 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
       const state=String(req.query.state??""),code=String(req.query.code??"");
       if(provider.isOwnerConfirmationCallback(state)){
         const s=await provider.finishOwnerConfirmation(code,state);
-        res.cookie("__Secure-messenger-confirm",s.cookie,{httpOnly:true,secure:true,sameSite:"lax",path:"/confirm",maxAge:600_000});
-        res.redirect(`/confirm/${s.approvalId}`);return;
+        const history=s.approvalId==="history-setup";
+        res.cookie("__Secure-messenger-confirm",s.cookie,{httpOnly:true,secure:true,sameSite:"lax",path:history?"/history":"/confirm",maxAge:600_000});
+        res.redirect(history?"/history/setup":`/confirm/${s.approvalId}`);return;
       }
       const back=await provider.handleGoogleCallback(code,state);res.redirect(back);
     }catch{res.status(403).type("text").send("Google login was not accepted. Use the configured owner's account or restart the login flow.");}
@@ -47,7 +49,9 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
   };
   const protectPage=(res:express.Response)=>{
     res.setHeader("Content-Security-Policy","default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
-    res.setHeader("Referrer-Policy","no-referrer");res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("X-Frame-Options","DENY");
+    // no-referrer makes Chrome navigation POSTs send Origin:null. same-origin
+    // keeps strict POST origin checks while suppressing cross-site referrers.
+    res.setHeader("Referrer-Policy","same-origin");res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("X-Frame-Options","DENY");
   };
   app.get("/confirm/:id",(req,res)=>{
     protectPage(res);const id=String(req.params.id);
@@ -55,6 +59,28 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
     const owner=webSession(req.headers.cookie,id);
     if(!owner){try{res.redirect(provider.beginOwnerConfirmation(id));}catch{res.status(429).send("Restart confirmation later.");}return;}
     try{res.type("html").send(confirmationHTML(confirmations.describe(id),owner.csrf));}catch{res.status(403).send("Permission revoked or confirmation expired. Not sent.");}
+  });
+  let restoringHistory=false;
+  app.get("/history/setup",async(req,res)=>{
+    protectPage(res);if(!(provider instanceof GoogleGatedProvider)){res.sendStatus(404);return;}
+    const owner=webSession(req.headers.cookie,"history-setup");
+    if(!owner){try{res.redirect(provider.beginOwnerConfirmation("history-setup"));}catch{res.sendStatus(429);}return;}
+    try{const status=await backend.request("status") as {history_ready?:boolean};res.type("html").send(historyPage(owner.csrf,status.history_ready===true));}catch{res.status(503).send("Messenger connection unavailable. No PIN was requested.");}
+  });
+  app.post("/history/setup",express.urlencoded({extended:false,limit:"2kb"}),async(req,res)=>{
+    protectPage(res);const owner=webSession(req.headers.cookie,"history-setup");const csrf=Buffer.from(typeof req.body?.csrf==="string"?req.body.csrf:"");
+    const expected=Buffer.from(owner?.csrf??"");
+    if(!owner||req.headers.origin!==origin||csrf.length!==expected.length||!timingSafeEqual(csrf,expected)){res.status(403).send("Owner login required.");return;}
+    const pin=typeof req.body?.pin==="string"?req.body.pin:"";if(req.body)req.body.pin="";
+    if(!/^[0-9]{6}$/.test(pin)){res.status(400).type("html").send(historyPage(owner.csrf,false,"6桁のPINを入力してください。"));return;}
+    if(restoringHistory){res.status(409).send("History setup is already in progress. Do not retry.");return;}
+    restoringHistory=true;
+    try{
+      const status=await backend.request("status") as {connected?:boolean};if(!status.connected)throw new Error("Messenger is offline; no PIN recovery attempted.");
+      const result=await backend.request("restore_history",{pin}) as {history_ready?:boolean};
+      res.type("html").send(historyPage(owner.csrf,result.history_ready===true));
+    }catch(e){const message=e instanceof Error?e.message.replaceAll(pin,"[redacted]"):"History setup failed. No automatic retry.";res.status(400).type("html").send(historyPage(owner.csrf,false,message));}
+    finally{restoringHistory=false;}
   });
   app.post("/confirm/:id",express.urlencoded({extended:false,limit:"2kb"}),async(req,res)=>{
     protectPage(res);const id=String(req.params.id),owner=webSession(req.headers.cookie,id);

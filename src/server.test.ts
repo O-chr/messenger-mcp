@@ -19,8 +19,20 @@ async function harness(cfg:Config,form=false,onRequest?:(op:string)=>void,fallba
 }
 test('default deny and global read ceiling hide send tool',async()=>{
   const cfg=defaultConfig(),h=await harness(cfg);try{
-    assert.deepEqual((await h.client.listTools()).tools.map(t=>t.name).sort(),['messenger_list_chats','messenger_read_messages','messenger_status']);
+    assert.deepEqual((await h.client.listTools()).tools.map(t=>t.name).sort(),['messenger_list_chats','messenger_read_history','messenger_read_messages','messenger_status']);
     const r=await h.client.callTool({name:'messenger_read_messages',arguments:{chat_id:'100',limit:5}});assert.equal(r.isError,true);assert.equal(h.calls.length,0);
+  }finally{await h.close();}
+});
+test('history reads enforce permission, cursor bounds and revocation without accepting a PIN',async()=>{
+  const cfg=config(),h=await harness(cfg,false,op=>{if(op==='history')cfg.chats['100'].read=false;});try{
+    const schema=(await h.client.listTools()).tools.find(t=>t.name==='messenger_read_history')!.inputSchema;
+    assert.ok(!Object.hasOwn(schema.properties??{},'pin'));
+    for(const args of [{chat_id:'200',limit:5},{chat_id:'100',limit:51},{chat_id:'100',before_ms:-1}]){
+      const r=await h.client.callTool({name:'messenger_read_history',arguments:args});assert.equal(r.isError,true);
+    }
+    assert.equal(h.calls.length,0);
+    const r=await h.client.callTool({name:'messenger_read_history',arguments:{chat_id:'100',limit:5,before_ms:1700000000000}});assert.equal(r.isError,true);
+    assert.deepEqual(h.calls[0],{op:'history',args:{chat_id:'100',expected_jid:'999@msgr',limit:5,before_ms:1700000000000}});
   }finally{await h.close();}
 });
 test('unallowed chat metadata and invalid targets never reach backend',async()=>{
