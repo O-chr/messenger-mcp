@@ -6,20 +6,16 @@ package messengercli
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"go.mau.fi/whatsmeow/types/events"
 )
 
 type bridgeRule struct {
@@ -98,6 +94,8 @@ func (p bridgePolicy) permitted(id, perm string, c Chat, global map[string]bool)
 	return perm == "write" && r.Write
 }
 
+// cachedMessage is one decrypted text returned to the MCP client. It is held in
+// memory only; this backend never writes message bodies to disk.
 type cachedMessage struct {
 	ID        string `json:"id"`
 	ChatID    string `json:"chat_id"`
@@ -107,14 +105,24 @@ type cachedMessage struct {
 	Timestamp int64  `json:"timestamp_ms"`
 	Source    string `json:"source"`
 }
+
+// idleDisconnect closes the Messenger connection after this long without a
+// request. The backend connects only when a tool needs Meta instead of staying
+// online as a resident receiver, so the account is not held open between uses.
+const idleDisconnect = 2 * time.Minute
+
 type bridgeBackend struct {
 	ctx        context.Context
 	state      *stateStore
 	policyPath string
 	global     map[string]bool
-	cli        *session
-	db         *sql.DB
-	cacheMu    sync.Mutex
+	idle       time.Duration
+	// connMu serializes requests with the idle sweeper so a connection is never
+	// closed while a history read or send is using it.
+	connMu    sync.Mutex
+	cli       *session
+	lastUsed  time.Time
+	closeConn func(*session) error
 }
 
 func (b *bridgeBackend) policy() (bridgePolicy, error) { return readBridgePolicy(b.policyPath) }
@@ -142,10 +150,7 @@ func (b *bridgeBackend) ensureOnline() error {
 	if b.cli != nil && b.cli.e2ee != nil && b.cli.e2ee.IsLoggedIn() {
 		return nil
 	}
-	if b.cli != nil {
-		_ = b.cli.close()
-		b.cli = nil
-	}
+	b.disconnectLocked()
 	ctx, cancel := context.WithTimeout(b.ctx, 60*time.Second)
 	cli, err := loadSession(ctx, b.state, b.state.data.Cookies, b.state.data.Platform)
 	cancel()
@@ -153,142 +158,51 @@ func (b *bridgeBackend) ensureOnline() error {
 		return err
 	}
 	b.cli = cli
-	cli.onMessage = b.capture
-	cli.keepOnline = true
-	// Keep the E2EE receiver connected for this MCP process' lifetime.
+	// No live receiver and no auto-reconnect: incoming events are acknowledged
+	// but never stored. Reads come from owner-enabled secure history on demand.
+	cli.keepOnline = false
 	if err = cli.connectE2EE(b.ctx, false); err != nil {
 		return err
 	}
 	return nil
 }
-func (b *bridgeBackend) openCache() error {
-	p := filepath.Join(b.state.dir, "messages.db")
-	if err := privatePath(p, false); errors.Is(err, os.ErrNotExist) {
-		f, e := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-		if e != nil {
-			return errors.New("cannot create message cache")
-		}
-		f.Close()
-	} else if err != nil {
-		return err
+func (b *bridgeBackend) disconnectLocked() {
+	if b.cli == nil {
+		return
 	}
-	u := (&url.URL{Scheme: "file", Path: p}).String() + "?_busy_timeout=5000&_journal_mode=DELETE"
-	db, err := sql.Open("sqlite3", u)
-	if err != nil {
-		return errors.New("cannot open message cache")
+	closeConn := b.closeConn
+	if closeConn == nil {
+		closeConn = (*session).close
 	}
-	db.SetMaxOpenConns(1)
-	b.db = db
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS messages (chat_id TEXT NOT NULL, id TEXT NOT NULL, sender TEXT NOT NULL, from_me INTEGER NOT NULL, body TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, source TEXT NOT NULL, PRIMARY KEY(chat_id,id)); CREATE INDEX IF NOT EXISTS message_time ON messages(chat_id,timestamp_ms);`)
-	if err != nil {
-		return errors.New("cannot initialize message cache")
-	}
-	return nil
+	_ = closeConn(b.cli)
+	b.cli = nil
 }
-func (b *bridgeBackend) prune() error {
-	b.cacheMu.Lock()
-	defer b.cacheMu.Unlock()
-	return b.pruneLocked()
-}
-func (b *bridgeBackend) pruneLocked() error {
-	p, err := b.policy()
-	ids := []string{}
-	args := []any{time.Now().Add(-7 * 24 * time.Hour).UnixMilli()}
-	if err == nil {
-		for _, c := range b.state.listChats() {
-			if p.permitted(c.ID, "read", c, b.global) && !c.Disappearing {
-				ids = append(ids, "?")
-				args = append(args, c.ID)
-			}
-		}
+func (b *bridgeBackend) disconnectIfIdle(now time.Time) bool {
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	if b.cli == nil || now.Sub(b.lastUsed) < b.idle {
+		return false
 	}
-	query := "DELETE FROM messages WHERE timestamp_ms < ?"
-	if len(ids) == 0 {
-		query = "DELETE FROM messages"
-		args = nil
-	} else {
-		query += " OR chat_id NOT IN (" + strings.Join(ids, ",") + ")"
-	}
-	if _, e := b.db.Exec(query, args...); e != nil {
-		return errors.New("cannot prune private cache")
-	}
-	return nil
-}
-func (b *bridgeBackend) capture(evt *events.FBMessage) bool {
-	if evt == nil {
-		return true
-	}
-	p, err := b.policy()
-	if err != nil {
-		return b.prune() == nil
-	}
-	for _, chat := range b.state.listChats() {
-		if chat.JID == evt.Info.Chat.ToNonAD().String() && p.permitted(chat.ID, "read", chat, b.global) {
-			return b.storeEvent(chat, evt, "live") == nil
-		}
-	}
+	b.disconnectLocked()
 	return true
 }
-func (b *bridgeBackend) storeEvent(chat Chat, evt *events.FBMessage, source string) error {
-	b.cacheMu.Lock()
-	defer b.cacheMu.Unlock()
-	// Re-read on every event. Permissions can be revoked while a connection is open.
-	if _, err := b.authorize(chat.ID, "read", chat.JID); err != nil {
-		return b.pruneLocked()
-	}
-	if chat.Disappearing || evt.FBApplication.GetMetadata().GetEphemeral() != nil {
-		return nil
-	}
-	content := evt.GetConsumerApplication().GetPayload().GetContent()
-	if revoke := evt.GetConsumerApplication().GetPayload().GetApplicationData().GetRevoke(); revoke != nil {
-		_, err := b.db.Exec("DELETE FROM messages WHERE chat_id=? AND id=?", chat.ID, revoke.GetKey().GetID())
-		return err
-	}
-	if edit := content.GetEditMessage(); edit != nil {
-		if len(edit.GetMessage().GetText()) > 16*1024 {
-			return nil
-		}
-		_, err := b.db.Exec("UPDATE messages SET body=? WHERE chat_id=? AND id=? AND sender=?", edit.GetMessage().GetText(), chat.ID, edit.GetKey().GetID(), evt.Info.Sender.User)
-		return err
-	}
-	text := content.GetMessageText()
-	if text == nil || evt.Info.ID == "" || len(text.GetText()) > 16*1024 {
-		return nil
-	}
-	if _, err := b.db.Exec(`INSERT INTO messages(chat_id,id,sender,from_me,body,timestamp_ms,source) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id,id) DO UPDATE SET body=excluded.body`, chat.ID, evt.Info.ID, evt.Info.Sender.User, evt.Info.IsFromMe, text.GetText(), evt.Info.Timestamp.UnixMilli(), source); err != nil {
-		return errors.New("cannot persist allowed message")
-	}
-	_, err := b.db.Exec(`DELETE FROM messages WHERE chat_id=? AND id NOT IN (SELECT id FROM messages WHERE chat_id=? ORDER BY timestamp_ms DESC,id DESC LIMIT 500)`, chat.ID, chat.ID)
-	return err
+func (b *bridgeBackend) serve(r bridgeRequest) (any, error) {
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	defer func() { b.lastUsed = time.Now() }()
+	return b.handle(r)
 }
-func (b *bridgeBackend) readMessages(id, jid string, limit int) ([]cachedMessage, error) {
-	if _, err := b.authorize(id, "read", jid); err != nil {
-		return nil, err
-	}
-	if err := b.prune(); err != nil {
-		return nil, err
-	}
-	rows, err := b.db.Query("SELECT id,chat_id,sender,from_me,body,timestamp_ms,source FROM messages WHERE chat_id=? ORDER BY timestamp_ms DESC,id DESC LIMIT ?", id, limit)
-	if err != nil {
-		return nil, errors.New("cannot read message cache")
-	}
-	defer rows.Close()
-	msgs := []cachedMessage{}
-	for rows.Next() {
-		var m cachedMessage
-		if rows.Scan(&m.ID, &m.ChatID, &m.Sender, &m.FromMe, &m.Text, &m.Timestamp, &m.Source) != nil {
-			return nil, errors.New("invalid cache record")
+
+// removeLegacyCache deletes the plaintext message cache that the former
+// resident receiver kept for up to 7 days. On-demand mode has no such cache, so
+// message bodies must not be left on disk after switching.
+func removeLegacyCache(dir string) error {
+	for _, name := range []string{"messages.db", "messages.db-journal", "messages.db-wal", "messages.db-shm"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errors.New("cannot remove legacy message cache")
 		}
-		msgs = append(msgs, m)
 	}
-	if rows.Err() != nil {
-		return nil, errors.New("cannot read message cache")
-	}
-	// Do not return a cached record if the owner revoked access during the query.
-	if _, err = b.authorize(id, "read", jid); err != nil {
-		return nil, err
-	}
-	return msgs, nil
+	return nil
 }
 
 type bridgeRequest struct {
@@ -314,23 +228,11 @@ func (b *bridgeBackend) handle(r bridgeRequest) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"profile_exists": b.state.data.AccountID != 0, "connected": b.cli != nil && b.cli.e2ee != nil && b.cli.e2ee.IsLoggedIn(), "message_history": "live_cache_and_optional_secure_history", "history_ready": b.historyReady(), "retention_days": 7}, nil
+		return map[string]any{"profile_exists": b.state.data.AccountID != 0, "connected": b.cli != nil && b.cli.e2ee != nil && b.cli.e2ee.IsLoggedIn(), "connection": "on_demand", "idle_disconnect_seconds": int(b.idle / time.Second), "message_history": "secure_history_on_demand", "history_ready": b.historyReady(), "plaintext_saved": false}, nil
 	case "restore_history":
 		return b.restoreHistory(r.PIN)
 	case "history":
 		return b.fetchHistory(r)
-	case "read":
-		if r.Limit < 1 || r.Limit > 50 {
-			return nil, errors.New("limit must be 1-50")
-		}
-		if _, err := b.authorize(r.ChatID, "read", r.JID); err != nil {
-			return nil, err
-		}
-		if err := b.ensureOnline(); err != nil {
-			return nil, err
-		}
-		msgs, err := b.readMessages(r.ChatID, r.JID, r.Limit)
-		return map[string]any{"chat_id": r.ChatID, "messages": msgs, "history": "live_cache_only; older backup history is not restored", "connected": true}, err
 	case "send":
 		if _, err := b.authorize(r.ChatID, "write", r.JID); err != nil {
 			return nil, err
@@ -351,18 +253,7 @@ func (b *bridgeBackend) handle(r bridgeRequest) (any, error) {
 		}
 		ctx, cancel := context.WithTimeout(b.ctx, 60*time.Second)
 		defer cancel()
-		result, err := b.cli.send(ctx, chat, text)
-		if err == nil {
-			// The sender may not receive its own live event. Only cache a confirmed
-			// send when the separate read permission still allows the chat.
-			b.cacheMu.Lock()
-			if _, e := b.authorize(chat.ID, "read", chat.JID); e == nil {
-				_, _ = b.db.Exec(`INSERT OR IGNORE INTO messages(chat_id,id,sender,from_me,body,timestamp_ms,source) VALUES(?,?,?,?,?,?,?)`, chat.ID, result.MessageID, b.state.data.AccountID, true, text, result.Timestamp.UnixMilli(), "sent_ack")
-				_, _ = b.db.Exec(`DELETE FROM messages WHERE chat_id=? AND id NOT IN (SELECT id FROM messages WHERE chat_id=? ORDER BY timestamp_ms DESC,id DESC LIMIT 500)`, chat.ID, chat.ID)
-			}
-			b.cacheMu.Unlock()
-		}
-		return result, err
+		return b.cli.send(ctx, chat, text)
 	default:
 		return nil, errors.New("unsupported backend operation")
 	}
@@ -394,40 +285,32 @@ func runBridge(ctx context.Context, args []string, dir string, in io.Reader, out
 		return err
 	}
 	defer s.Close()
-	b := &bridgeBackend{ctx: ctx, state: s, policyPath: *policyPath, global: global}
-	if err = b.openCache(); err != nil {
+	if err = removeLegacyCache(s.dir); err != nil {
 		return err
 	}
-	defer b.db.Close()
+	b := &bridgeBackend{ctx: ctx, state: s, policyPath: *policyPath, global: global, idle: idleDisconnect}
 	defer func() {
-		if b.cli != nil {
-			_ = b.cli.close()
-		}
+		b.connMu.Lock()
+		b.disconnectLocked()
+		b.connMu.Unlock()
 	}()
-	if err = b.prune(); err != nil {
-		return err
-	}
-	// Revocation erases plaintext cache promptly even when no tools are called.
+	// Nothing connects at startup. The sweeper only closes an idle connection.
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	sweepDone := make(chan struct{})
 	defer func() { stopSweep(); <-sweepDone }()
 	go func() {
 		defer close(sweepDone)
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-sweepCtx.Done():
 				return
-			case <-ticker.C:
-				_ = b.prune()
+			case now := <-ticker.C:
+				b.disconnectIfIdle(now)
 			}
 		}
 	}()
-	p, policyErr := b.policy()
-	if policyErr == nil && len(p.Chats) > 0 && (global["read"] || global["write"]) {
-		_ = b.ensureOnline()
-	}
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 4096), 128*1024)
 	encoder := json.NewEncoder(out)
@@ -443,7 +326,7 @@ func runBridge(ctx context.Context, args []string, dir string, in io.Reader, out
 			}
 			continue
 		}
-		result, e := b.handle(r)
+		result, e := b.serve(r)
 		response := bridgeResponse{ID: r.ID, Result: result}
 		if e != nil {
 			response.Result = nil

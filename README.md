@@ -4,8 +4,7 @@
 
 - `messenger_status`: 接続と有効な権限
 - `messenger_list_chats`: 許可されたチャットだけの一覧
-- `messenger_read_messages`: 許可されたチャットの最近のテキスト
-- `messenger_read_history`: セキュアストレージから過去のE2EEテキストをページ取得
+- `messenger_read_history`: セキュアストレージから許可チャットのE2EEテキストを新しい順にページ取得
 - `messenger_send_message`: 宛先と本文を本人が確認してからE2EE送信
 - `messenger_send_status`: 本人確認待ち・送信結果の確認（送信処理は行わない）
 
@@ -41,13 +40,13 @@ Codex等のMCPフォーム対応クライアントでは、その場で送信を
 
 ## 読み取りと制限
 
-受信機を起動してから受け取ったE2EEテキストを、許可されたチャットだけローカルに保存する。過去履歴は `/history/setup` で本人がGoogle認証し、6桁のMessenger復元用PINを入力して接続する。PINは保存せずMCPにも公開しない。復元した履歴デバイス鍵は既存の私有プロファイルに保存し、登録結果が不明なら自動再試行しない。
+常駐の受信機は持たない。Messengerへは、ツールがMetaとの通信を必要としたときにだけ接続し、最後の利用から2分たつと切断する。受信したメッセージをローカルに保存しない。起動時に旧版の受信キャッシュ（`messages.db`）が残っていれば削除する。
 
-`messenger_read_history` は許可されたE2EEチャットだけを最大50件ずつ取得し、本文はメモリー上で返してディスクへ保存しない。`has_more` と `before_ms` で古いページへ進む。サーバー上のバックアップに残る範囲のみで、削除済み・未バックアップ・未対応形式の全復元は保証しない。
+読み取りはすべて `messenger_read_history` で、セキュアストレージから行う。事前に `/history/setup` で本人がGoogle認証し、6桁のMessenger復元用PINを入力しておく。PINは最初の1回だけで、保存せずMCPにも公開しない。復元した履歴デバイス鍵は既存の私有プロファイルに保存し、登録結果が不明なら自動再試行しない。
 
-受信キャッシュは最大7日・各500件、1回の読み取り最大50件。権限を取り消すと保存済み本文を削除する。消えるメッセージ・メディアには非対応。
+`messenger_read_history` は許可されたE2EEチャットだけを最大50件ずつ新しい順に取得し、本文はメモリー上で返してディスクへ保存しない。`has_more` と `before_ms` で古いページへ進む。サーバー上のバックアップに残る範囲のみで、削除済み・未バックアップ・未対応形式の全復元は保証しない。送信直後のメッセージがバックアップに反映されるまでの時間は未検証。
 
-現在のCLIはE2EE宛先が解決できるチャットだけ送信可能。旧形式のグループ等は権限があっても送信できない。非暗号化経路へのフォールバックはしない。Macが起動し、ネット接続している必要がある。Metaの非公式プロトコルに依存する。
+現在のCLIはE2EE宛先が解決できるチャットだけ送信可能。消えるメッセージ・メディアには非対応。旧形式のグループ等は権限があっても送信できない。非暗号化経路へのフォールバックはしない。Macが起動し、ネット接続している必要がある。Metaの非公式プロトコルに依存する。
 
 ## 起動
 
@@ -83,9 +82,9 @@ MCP OAuthはDCR + PKCE、リソース固定、短期アクセストークン、�
 - ローカル: `127.0.0.1:8791`
 - launchd: `com.personal.messenger-personal-mcp` / `com.personal.messenger-personal-mcp.tunnel`
 - 認証・権限・ログ: `~/.config/messenger-personal-mcp/`
-- Messenger Cookie・鍵・本文キャッシュ: `~/Library/Application Support/messenger-cli/`
+- Messenger Cookie・鍵: `~/Library/Application Support/messenger-cli/`
 
-ローカルプロファイルは所有者権限のみだが、Cookie・デバイス鍵・本文DBそのものは平文。GitやDriveに保存しない。ログへ認証情報・本文を出さない。
+ローカルプロファイルは所有者権限のみだが、Cookie・デバイス鍵そのものは平文。GitやDriveに保存しない。ログへ認証情報・本文を出さない。
 
 `npm start` はstdio用。HTTP常駐と同時に同じMessengerプロファイルを開かない。`MESSENGER_BIN`、`MESSENGER_STATE_DIR`、`MESSENGER_MCP_CONFIG` でローカル配置を変更できる。
 

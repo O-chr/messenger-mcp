@@ -7,6 +7,8 @@ import (
 	"go.mau.fi/whatsmeow/proto/waArmadilloBackupMessage"
 	"go.mau.fi/whatsmeow/proto/waMsgApplication"
 	"google.golang.org/protobuf/proto"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -49,10 +51,8 @@ func TestArchiveTextIsReturnedWithoutPlaintextCaching(t *testing.T) {
 	if e != nil || got == nil || got.Text != "older encrypted text" || !got.FromMe || got.Timestamp != ts {
 		t.Fatalf("archive text conversion failed: %v", e)
 	}
-	var n int
-	b.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&n)
-	if n != 0 {
-		t.Fatal("old plaintext cached")
+	if _, e = os.Stat(filepath.Join(b.state.dir, "messages.db")); !os.IsNotExist(e) {
+		t.Fatal("history created a plaintext cache")
 	}
 	chat.Disappearing = true
 	if got, e = archiveText(chat, m, 123); e != nil || got != nil {

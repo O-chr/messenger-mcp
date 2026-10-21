@@ -19,8 +19,8 @@ async function harness(cfg:Config,form=false,onRequest?:(op:string)=>void,fallba
 }
 test('default deny and global read ceiling hide send tool',async()=>{
   const cfg=defaultConfig(),h=await harness(cfg);try{
-    assert.deepEqual((await h.client.listTools()).tools.map(t=>t.name).sort(),['messenger_list_chats','messenger_read_history','messenger_read_messages','messenger_status']);
-    const r=await h.client.callTool({name:'messenger_read_messages',arguments:{chat_id:'100',limit:5}});assert.equal(r.isError,true);assert.equal(h.calls.length,0);
+    assert.deepEqual((await h.client.listTools()).tools.map(t=>t.name).sort(),['messenger_list_chats','messenger_read_history','messenger_status']);
+    const r=await h.client.callTool({name:'messenger_read_history',arguments:{chat_id:'100',limit:5}});assert.equal(r.isError,true);assert.equal(h.calls.length,0);
   }finally{await h.close();}
 });
 test('history reads enforce permission, cursor bounds and revocation without accepting a PIN',async()=>{
@@ -58,8 +58,8 @@ test('approval binds exact body and target, permission revocation or target chan
   }finally{await h.close();}}
 });
 test('revocation while reading drops fetched data',async()=>{
-  const cfg=config(),h=await harness(cfg,false,op=>{if(op==='read')cfg.chats['100'].read=false;});try{
-    const r=await h.client.callTool({name:'messenger_read_messages',arguments:{chat_id:'100'}});assert.equal(r.isError,true);assert.doesNotMatch(JSON.stringify(r),/"ok"/);
+  const cfg=config(),h=await harness(cfg,false,op=>{if(op==='history')cfg.chats['100'].read=false;});try{
+    const r=await h.client.callTool({name:'messenger_read_history',arguments:{chat_id:'100'}});assert.equal(r.isError,true);assert.doesNotMatch(JSON.stringify(r),/"ok"/);
   }finally{await h.close();}
 });
 test('status reports whether this client supports the required send confirmation',async()=>{

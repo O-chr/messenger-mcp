@@ -4,8 +4,6 @@ package messengercli
 import (
 	"context"
 	"encoding/json"
-	watypes "go.mau.fi/whatsmeow/types"
-	"go.mau.fi/whatsmeow/types/events"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,20 +25,13 @@ func bridgeFixture(t *testing.T) (*bridgeBackend, bridgePolicy, func(bridgePolic
 		}
 	}
 	save(p)
-	b := &bridgeBackend{ctx: context.Background(), state: s, policyPath: path, global: map[string]bool{"read": true, "write": true}}
-	if e = b.openCache(); e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(func() { b.db.Close(); s.Close() })
+	b := &bridgeBackend{ctx: context.Background(), state: s, policyPath: path, global: map[string]bool{"read": true, "write": true}, idle: idleDisconnect}
+	t.Cleanup(func() { s.Close() })
 	return b, p, save
-}
-func fakeEvent(chat, id, text string) *events.FBMessage {
-	jid, _ := watypes.ParseJID(chat)
-	return &events.FBMessage{Info: watypes.MessageInfo{MessageSource: watypes.MessageSource{Chat: jid, Sender: watypes.NewJID("999", watypes.MessengerServer)}, ID: id, Timestamp: time.Now()}, Message: textMessage(text)}
 }
 func TestBridgePermissionBindingBeforeNetwork(t *testing.T) {
 	b, p, save := bridgeFixture(t)
-	for _, r := range []bridgeRequest{{Op: "read", ChatID: "200", JID: "200@msgr", Limit: 1}, {Op: "send", ChatID: "100", JID: "wrong@msgr", Text: "hello"}, {Op: "read", ChatID: "300", JID: "300@g.us", Limit: 51}} {
+	for _, r := range []bridgeRequest{{Op: "history", ChatID: "200", JID: "200@msgr", Limit: 1}, {Op: "send", ChatID: "100", JID: "wrong@msgr", Text: "hello"}, {Op: "history", ChatID: "300", JID: "300@g.us", Limit: 51}, {Op: "read", ChatID: "100", JID: "999@msgr", Limit: 1}} {
 		if _, e := b.handle(r); e == nil {
 			t.Fatal("unsafe request accepted")
 		}
@@ -62,68 +53,51 @@ func TestBridgePermissionBindingBeforeNetwork(t *testing.T) {
 		t.Fatal("group opt-in missing")
 	}
 }
-func TestBridgeCacheOnlyAllowedAndRevocationPurges(t *testing.T) {
-	b, p, save := bridgeFixture(t)
-	for _, chat := range []string{"999@msgr", "200@msgr", "400@msgr", "12345@msgr"} {
-		if !b.capture(fakeEvent(chat, "message-1", "private")) {
-			t.Fatal("capture failed")
+func TestBridgeRemovesLegacyPlaintextCache(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"messages.db", "messages.db-journal", "messages.db-wal", "messages.db-shm"} {
+		if e := os.WriteFile(filepath.Join(dir, name), []byte("old plaintext"), 0600); e != nil {
+			t.Fatal(e)
 		}
 	}
-	msgs, e := b.readMessages("100", "999@msgr", 10)
-	if e != nil || len(msgs) != 1 || msgs[0].Text != "private" {
-		t.Fatalf("allowed message missing %v", e)
-	}
-	var count int
-	if e = b.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count); e != nil || count != 1 {
-		t.Fatal("denied or disappearing message persisted")
-	}
-	r := p.Chats["100"]
-	r.Read = false
-	p.Chats["100"] = r
-	save(p)
-	if e = b.prune(); e != nil {
+	keep := filepath.Join(dir, "account.json")
+	if e := os.WriteFile(keep, []byte("{}"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = b.readMessages("100", "999@msgr", 10); e == nil {
-		t.Fatal("revoked read accepted")
+	for i := 0; i < 2; i++ {
+		if e := removeLegacyCache(dir); e != nil {
+			t.Fatal(e)
+		}
 	}
-	b.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
-	if count != 0 {
-		t.Fatal("revoked cache remains")
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 || entries[0].Name() != "account.json" {
+		t.Fatalf("unexpected profile contents after cleanup: %v", entries)
 	}
 }
-func TestBridgeCacheBoundAndFailClosedPolicy(t *testing.T) {
-	b, p, save := bridgeFixture(t)
-	for i := 0; i < 502; i++ {
-		evt := fakeEvent("999@msgr", time.Unix(int64(i), 0).Format(time.RFC3339), "text")
-		if !b.capture(evt) {
-			t.Fatal("capture failed")
-		}
+func TestBridgeStatusDoesNotConnect(t *testing.T) {
+	b, _, _ := bridgeFixture(t)
+	v, e := b.serve(bridgeRequest{ID: 1, Op: "status"})
+	if e != nil || b.cli != nil {
+		t.Fatalf("status connected or failed: %v", e)
 	}
-	var count int
-	b.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
-	if count != 500 {
-		t.Fatalf("cache cap: %d", count)
+	m := v.(map[string]any)
+	if m["connection"] != "on_demand" || m["plaintext_saved"] != false || m["idle_disconnect_seconds"] != 120 {
+		t.Fatalf("unexpected status: %v", m)
 	}
-	b.db.Exec("UPDATE messages SET timestamp_ms=?", time.Now().Add(-8*24*time.Hour).UnixMilli())
-	if e := b.prune(); e != nil {
-		t.Fatal(e)
+}
+func TestBridgeIdleDisconnect(t *testing.T) {
+	b, _, _ := bridgeFixture(t)
+	closed := 0
+	b.closeConn = func(*session) error { closed++; return nil }
+	b.cli = &session{}
+	b.lastUsed = time.Now()
+	if b.disconnectIfIdle(b.lastUsed.Add(idleDisconnect - time.Second)) {
+		t.Fatal("disconnected before idle timeout")
 	}
-	b.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
-	if count != 0 {
-		t.Fatal("old cache retained")
+	if !b.disconnectIfIdle(b.lastUsed.Add(idleDisconnect)) || b.cli != nil || closed != 1 {
+		t.Fatal("idle connection not closed")
 	}
-	b.capture(fakeEvent("999@msgr", "new", "secret"))
-	p.ConfirmSend = false
-	save(p)
-	if _, e := b.policy(); e == nil {
-		t.Fatal("invalid config accepted")
-	}
-	if e := b.prune(); e != nil {
-		t.Fatal(e)
-	}
-	b.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
-	if count != 0 {
-		t.Fatal("invalid config did not purge")
+	if b.disconnectIfIdle(b.lastUsed.Add(time.Hour)) || closed != 1 {
+		t.Fatal("closed twice")
 	}
 }
