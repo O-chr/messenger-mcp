@@ -7,8 +7,9 @@ description: 個人Facebook Messengerの許可済みチャット一覧・接続�
 
 これは個人Facebook Messenger用。FacebookページのビジネスAPIではない。
 
-1. 接続を `messenger_status` で確認し、`messenger_list_chats` から許可された宛先IDと読み書き権限を確認する。名前の推測や別サービスのIDで送信しない。
+1. 接続を `messenger_status` で確認し、`messenger_list_chats` から許可された宛先IDと読み書き権限を確認する。名前の推測や別サービスのIDで送信しない。`connection: on_demand` の場合、待機中の `connected: false` だけで障害と判断しない。`history_ready: true` ならPIN復元済みなので再入力を求めない。
 2. 読み取りは `messenger_read_history` だけ。必要なチャットを新しい順に1ページずつ取得する（最大50件）。`has_more` が true なら、返された `before_ms` を次の呼び出しに渡す。事前に本人用の履歴接続画面でPIN復元が必要。未設定なら `messenger_status` の `history_setup_url` を本人に提示する。PINはチャットやMCPツールで求めず、本人だけが管理画面へ入力する。空の結果やメディアの除外を「過去に会話がない」と説明しない。消えるメッセージ・未対応形式・バックアップに残っていない履歴には対応できない。
+   常駐受信・ローカルの本文キャッシュは使わない。`messenger_read_messages` は廃止済み。古いツール一覧に残っていても呼び出さず、`messenger_read_history` を使う。バックアップ反映前の最新メッセージが取得できるとは保証しない。
 3. 送信はユーザーが相手・本文を指定した場合のみ `messenger_send_message` を使う。不明な宛先・本文は確認する。Codex等の対応クライアントは確認フォームを表示する。フォーム未対応のChatGPTでは未送信の確認リンクが返る。リンクをユーザーに提示し、本人がGoogle認証後に宛先・本文を確認して「この1通を送信する」を押すよう案内する。AIが本人に代わってリンクを開いたり承認したりしない。`pending` を送信成功と説明しない。確認後は同じ `confirmation_id` を `messenger_send_status` で確認する。送信ツールを再実行して結果を確認しない。
 4. 確認フォームと確認ページの両方が利用できない場合、拒否・期限切れ・権限不足の場合は停止し、その理由を伝える。Cookie、鍵、CLIの直接実行、別のAPIやブラウザーで確認を迂回しない。送信結果不明なら自動再送しない。
 

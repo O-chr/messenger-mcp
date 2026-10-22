@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dev-6ad76a3077648191860ed3c56ada7ac1",
+  "version": "1.0.4",
+  "description": "本人が許可した個人Messengerチャットの読み取りと、確認後のメッセージ送信。",
+  "author": {
+    "name": "App developer"
+  },
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "capabilities": [],
+        "category": "Other",
+        "defaultPrompt": null,
+        "developerName": "App developer",
+        "displayName": "個人Messenger MCP",
+        "longDescription": "本人が許可した個人Messengerチャットの読み取りと、確認後のメッセージ送信。",
+        "shortDescription": "本人が許可した個人Messengerチャットの読み取りと、確認後のメッセージ送信。"
+      }
+    }
+  }
+}

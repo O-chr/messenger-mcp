@@ -76,7 +76,8 @@ export function createHTTPApp(provider:OAuthServerProvider,publicUrl:string,back
     if(restoringHistory){res.status(409).send("History setup is already in progress. Do not retry.");return;}
     restoringHistory=true;
     try{
-      const status=await backend.request("status") as {connected?:boolean};if(!status.connected)throw new Error("Messenger is offline; no PIN recovery attempted.");
+      // The backend connects on demand after checking permissions. Idle status
+      // is normally disconnected and must not block the owner's first setup.
       const result=await backend.request("restore_history",{pin}) as {history_ready?:boolean};
       res.type("html").send(historyPage(owner.csrf,result.history_ready===true));
     }catch(e){const message=e instanceof Error?e.message.replaceAll(pin,"[redacted]"):"History setup failed. No automatic retry.";res.status(400).type("html").send(historyPage(owner.csrf,false,message));}
